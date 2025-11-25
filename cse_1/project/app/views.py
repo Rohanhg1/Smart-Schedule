@@ -18,6 +18,7 @@ from reportlab.lib.pagesizes import letter, A4
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER
 
 from .forms import TeacherForm, TotalTeachersForm, SeatingForm
 
@@ -450,13 +451,14 @@ def timetable_teachers(request):
                         if integrated or ext or cd.get("lab_y3") or cd.get("external_lab_y3"):
                             entries.append({"teacher": name, "year": 3, "subject": subj, "hours": 0, "is_integrated": integrated, "is_lab": True if cd.get("lab_y3") else False, "is_external_lab": ext, "remaining": 0, "day_time_prefs": day_time_prefs if has_pref else {}})
 
+
             # Store entries in session for regeneration
             request.session["entries"] = entries
             
             # call allocation (defined in later parts)
-            timetables, unallocated = allocate_timetable_with_ga(entries)
+            timetables, unallocated, teacher_allocations = allocate_timetable_with_ga(entries)
 
-            # Collect teachers and their subjects
+            # Collect teachers and their subjects (overall)
             teacher_subjects = {}
             for entry in entries:
                 teacher = entry['teacher']
@@ -466,10 +468,28 @@ def timetable_teachers(request):
                 if subject not in teacher_subjects[teacher]:
                     teacher_subjects[teacher].append(subject)
 
+            # Collect teachers and their subjects per semester/year
+            semester_teacher_subjects = {}
+            for entry in entries:
+                year = entry['year']
+                teacher = entry['teacher']
+                subject = entry['subject']
+                
+                if year not in semester_teacher_subjects:
+                    semester_teacher_subjects[year] = {}
+                
+                if teacher not in semester_teacher_subjects[year]:
+                    semester_teacher_subjects[year][teacher] = []
+                
+                if subject not in semester_teacher_subjects[year][teacher]:
+                    semester_teacher_subjects[year][teacher].append(subject)
+
             # Store in session for PDF download and individual teacher views
             request.session["timetables"] = timetables
             request.session["unallocated"] = unallocated
             request.session["teacher_subjects"] = teacher_subjects
+            request.session["teacher_allocations"] = teacher_allocations
+            request.session["semester_teacher_subjects"] = semester_teacher_subjects
             request.session["year_labels"] = year_labels
             request.session["semester_type"] = semester_type
 
@@ -479,6 +499,7 @@ def timetable_teachers(request):
                 "days": DAYS,
                 "unallocated": unallocated,
                 "teacher_subjects": teacher_subjects,
+                "semester_teacher_subjects": semester_teacher_subjects,
                 "year_labels": year_labels,
                 "semester_type": semester_type
             })
@@ -498,6 +519,7 @@ def timetable_teachers(request):
 
     return render(request, "app/timetable_teachers_raw.html", {"formset": formset, "total": total, "year_labels": year_labels, "semester_type": semester_type})
 
+
 @login_required
 def teacher_timetable(request, teacher_name):
     timetables = request.session.get("timetables")
@@ -507,17 +529,33 @@ def teacher_timetable(request, teacher_name):
         return redirect("timetable_teachers")
 
     # Filter timetables to show only this teacher's assignments
+    # Use direct teacher allocations if available, otherwise fallback (legacy)
+    teacher_allocations = request.session.get("teacher_allocations")
+    
     teacher_timetables = {}
-    for year, days_dict in timetables.items():
-        teacher_timetables[year] = {}
-        for day, slots in days_dict.items():
-            teacher_slots = []
-            for slot in slots:
-                if slot and any(subject in slot for subject in teacher_subjects[teacher_name]):
-                    teacher_slots.append(slot)
-                else:
-                    teacher_slots.append(None)
-            teacher_timetables[year][day] = teacher_slots
+    if teacher_allocations and teacher_name in teacher_allocations:
+        # Use the direct mapping
+        raw_alloc = teacher_allocations[teacher_name]
+        # raw_alloc is {year: {day: [slot, slot, ...]}}
+        # We need to ensure it matches the structure expected by template
+        # The template expects: timetables[year][day] -> list of slots
+        # Our raw_alloc is exactly that structure.
+        # However, we need to ensure all years/days are present?
+        # The template iterates over `timetables.items()`.
+        # So we should pass the raw_alloc directly as `timetables` for that teacher.
+        teacher_timetables = raw_alloc
+    else:
+        # Fallback to old logic (prone to subject name collisions)
+        for year, days_dict in timetables.items():
+            teacher_timetables[year] = {}
+            for day, slots in days_dict.items():
+                teacher_slots = []
+                for slot in slots:
+                    if slot and any(subject in slot for subject in teacher_subjects[teacher_name]):
+                        teacher_slots.append(slot)
+                    else:
+                        teacher_slots.append(None)
+                teacher_timetables[year][day] = teacher_slots
 
     return render(request, "app/teacher_timetable.html", {
         "teacher_name": teacher_name,
@@ -530,129 +568,116 @@ def teacher_timetable(request, teacher_name):
 
 
 @login_required
+@login_required
 def download_timetable_pdf(request):
     timetables = request.session.get("timetables")
-    unallocated = request.session.get("unallocated")
     year_labels = request.session.get("year_labels", {})
-    teacher_subjects = request.session.get("teacher_subjects", {})
+    semester_teacher_subjects = request.session.get("semester_teacher_subjects", {})
+
     if not timetables:
         return redirect("timetable_start")
 
-    # Generate PDF matching HTML layout exactly
     buffer = BytesIO()
-    # Use minimal margins to maximize space
-    doc = SimpleDocTemplate(buffer, pagesize=letter, leftMargin=10, rightMargin=10, topMargin=10, bottomMargin=10)
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        leftMargin=25,
+        rightMargin=25,
+        topMargin=20,
+        bottomMargin=20
+    )
+
     elements = []
     styles = getSampleStyleSheet()
 
-    # Centered title, smaller
-    title_style = styles['Title']
-    title_style.alignment = 1  # Center
-    title_style.fontSize = 14
-    elements.append(Paragraph("Generated Timetables", title_style))
-    elements.append(Spacer(1, 6))  # Smaller spacer
+    # Title
+    title_style = ParagraphStyle(
+        "title",
+        parent=styles["Title"],
+        alignment=1,
+        fontSize=16,
+        spaceAfter=10
+    )
 
-    # Warning box if unallocated, smaller
-    if unallocated:
-        warning_text = "<strong>Warning — some hours couldn't be scheduled:</strong><br/>"
-        for u in unallocated:
-            theory_rem = u.get('theory_remaining', 0)
-            lab_rem = u.get('lab_remaining', 0)
-            warning_text += f"• {u['teacher']} (Year {u['year']}) — {u['subject']} — theory: {theory_rem}, lab: {lab_rem} — int: {'Y' if u['is_integrated'] else 'N'} — ext: {'Y' if u['is_external_lab'] else 'N'}<br/>"
-        warning_style = ParagraphStyle('Warning', parent=styles['Normal'], backColor=colors.HexColor('#ffe6e6'), borderColor=colors.HexColor('#ff9999'), borderWidth=1, borderPadding=5, spaceAfter=10, fontSize=8)
-        elements.append(Paragraph(warning_text, warning_style))
-        elements.append(Spacer(1, 6))
+    heading_style = ParagraphStyle(
+        "heading",
+        parent=styles["Heading2"],
+        fontSize=12,
+        spaceAfter=6
+    )
 
-    # Teacher boxes: smaller
-    if teacher_subjects:
-        teacher_data = []
-        row = []
-        for teacher, subjects in teacher_subjects.items():
-            box_text = f"<strong>{teacher}</strong><br/>{', '.join(subjects)}"
-            box_style = ParagraphStyle('TeacherBox', parent=styles['Normal'], backColor=colors.HexColor('#e9f7ef'), borderColor=colors.HexColor('#27ae60'), borderWidth=1, borderPadding=5, alignment=1, fontSize=8)
-            row.append(Paragraph(box_text, box_style))
-            if len(row) == 3:  # 3 boxes per row
-                teacher_data.append(row)
-                row = []
-        if row:
-            while len(row) < 3:
-                row.append('')  # Pad row
-            teacher_data.append(row)
-        teacher_table = Table(teacher_data, colWidths=[180]*3)
-        teacher_table.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'MIDDLE')]))
-        elements.append(teacher_table)
-        elements.append(Spacer(1, 10))
+    # COMPACT spacing like your PDF
+    small_space = Spacer(1, 6)
 
-    # Timetables per semester
     for year, days_dict in timetables.items():
-        sem_label = year_labels.get(year, f"Year {year}")
-        # Semester heading, smaller
-        heading_style = styles['Heading3']
-        heading_style.borderWidth = 0
-        heading_style.borderColor = colors.HexColor('#ddd')
-        heading_style.borderPadding = 2
-        heading_style.spaceAfter = 5
-        heading_style.fontSize = 12
-        elements.append(Paragraph(f"Semester {sem_label}", heading_style))
+        sem_no = year_labels.get(year, year)
 
-        # Table data
+        # ------------- TIMETABLE TITLE -------------
+        elements.append(Paragraph(f"Semester {sem_no} – Timetable", title_style))
+        elements.append(small_space)
+
+        # ------------- TIMETABLE TABLE -------------
         data = []
-        # Header row, smaller font
-        header = ['Day']
-        for period_name, time in PERIODS:
-            header.append(f"{period_name} {time}")
+        header = ["Day"]
+        for p_name, p_time in PERIODS:
+            header.append(f"{p_name}\n{p_time}")
         data.append(header)
 
-        # Data rows
         for day in DAYS:
             row = [day]
-            slots = days_dict.get(day, [None] * len(PERIODS))
-            for slot in slots:
-                cell_text = slot if slot else '-'
-                row.append(cell_text)
+            for slot in days_dict[day]:
+                row.append(slot if slot else "-")
             data.append(row)
 
-        # Calculate column widths to fit the page (letter: 612 points, margins 10 each, usable ~592)
-        page_width = 592
-        num_cols = 10  # Day + 9 periods
-        col_width = page_width / num_cols
-        colWidths = [col_width] * num_cols
+        timetable_table = Table(data)
+        timetable_table.setStyle(TableStyle([
+            ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+            ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
+            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('FONTSIZE', (0,0), (-1,-1), 7),
+            ('BOTTOMPADDING', (0,0), (-1,0), 3),
+            ('TOPPADDING', (0,0), (-1,0), 3),
+        ]))
 
-        # Create table with fixed widths
-        table = Table(data, colWidths=colWidths)
-        table_styles = [
-            # Header: background #f2f2f2, bold, center, tiny font
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#f2f2f2')),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('FONTSIZE', (0, 0), (-1, 0), 6),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 1),
-            ('TOPPADDING', (0, 0), (-1, 0), 1),
-            ('LEFTPADDING', (0, 0), (-1, -1), 1),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 1),
-            # Body: tiny font
-            ('FONTSIZE', (0, 1), (-1, -1), 4),
-            # Grid: thin
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#ddd')),
-        ]
+        elements.append(timetable_table)
+        elements.append(Spacer(1, 12))  # small spacing only
 
-        # Apply lab highlighting
-        for row_idx in range(1, len(data)):  # Skip header
-            for col_idx in range(1, len(data[row_idx])):  # Skip 'Day' column
-                slot = data[row_idx][col_idx]
-                if slot and ' - Lab' in slot:
-                    table_styles.append(('BACKGROUND', (col_idx, row_idx), (col_idx, row_idx), colors.lightblue))
+        # ------------- TEACHER LIST TITLE -------------
+        elements.append(Paragraph(
+            f"Teachers Handling Subjects – Semester {sem_no}",
+            heading_style
+        ))
+        elements.append(small_space)
 
-        table.setStyle(TableStyle(table_styles))
-        elements.append(table)
-        elements.append(Spacer(1, 10))  # Smaller spacer
+        # ------------- TEACHER LIST TABLE -------------
+        teacher_map = semester_teacher_subjects.get(year, {})
+        t_data = [["Teacher Name", "Subject(s)"]]
+
+        for teacher, subs in teacher_map.items():
+            t_data.append([teacher, ", ".join(subs)])
+
+        teacher_table = Table(t_data)
+        teacher_table.setStyle(TableStyle([
+            ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+            ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0,0), (-1,-1), 8),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ]))
+
+        elements.append(teacher_table)
+
+        # PAGE BREAK after finishing one semester
+        elements.append(PageBreak())
 
     doc.build(elements)
     buffer.seek(0)
-    response = HttpResponse(buffer.getvalue(), content_type='application/pdf')
-    response['Content-Disposition'] = 'attachment; filename="timetable.pdf"'
+
+    response = HttpResponse(buffer.getvalue(), content_type="application/pdf")
+    response['Content-Disposition'] = 'attachment; filename=\"timetable.pdf\"'
     return response
+
 
 
 @login_required
@@ -664,17 +689,23 @@ def download_teacher_timetable_pdf(request, teacher_name):
         return redirect("timetable_teachers")
 
     # Filter timetables to show only this teacher's assignments
+    # Filter timetables to show only this teacher's assignments
+    teacher_allocations = request.session.get("teacher_allocations")
     teacher_timetables = {}
-    for year, days_dict in timetables.items():
-        teacher_timetables[year] = {}
-        for day, slots in days_dict.items():
-            teacher_slots = []
-            for slot in slots:
-                if slot and any(subject in slot for subject in teacher_subjects[teacher_name]):
-                    teacher_slots.append(slot)
-                else:
-                    teacher_slots.append(None)
-            teacher_timetables[year][day] = teacher_slots
+    
+    if teacher_allocations and teacher_name in teacher_allocations:
+        teacher_timetables = teacher_allocations[teacher_name]
+    else:
+        for year, days_dict in timetables.items():
+            teacher_timetables[year] = {}
+            for day, slots in days_dict.items():
+                teacher_slots = []
+                for slot in slots:
+                    if slot and any(subject in slot for subject in teacher_subjects[teacher_name]):
+                        teacher_slots.append(slot)
+                    else:
+                        teacher_slots.append(None)
+                teacher_timetables[year][day] = teacher_slots
 
     # Generate PDF matching the HTML layout and styles
     buffer = BytesIO()
@@ -793,7 +824,12 @@ def allocate_timetable_with_ga(entries_input):
         y = int(e.get("year", 1))
         t = e['teacher']
         s = e['subject']
+        s = e['subject']
         prefs = e.get('day_time_prefs', {})
+        
+        # DEBUG PRINT
+        if prefs:
+            print(f"DEBUG: Entry {i} Teacher {t} Subject {s} Year {y} has PREFS: {prefs}")
         
         # Theory Component
         # IMPORTANT: For integrated subjects (with or without external), 
@@ -825,14 +861,19 @@ def allocate_timetable_with_ga(entries_input):
                 'id': i, 'year': y, 'teacher': t, 'subject': s, 
                 'duration': lab_dur, 'prefs': prefs,
                 'is_integrated': e.get("is_integrated", False),
-                'is_external_lab': e.get("is_external_lab", False)
+                'is_external_lab': e.get("is_external_lab", False),
+                'has_theory': th_hours > 0 # Flag to indicate if this lab has a theory component
             })
 
     # --- Variables ---
     # theory_vars[(req_idx, day, period)] = bool
     theory_vars = {} 
     # lab_vars[(req_idx, day, start_period)] = bool
+    # lab_vars[(req_idx, day, start_period)] = bool
     lab_vars = {}
+    
+    # Objective terms
+    pref_score = []
     
     # 1. Create Theory Variables
     for r_idx, req in enumerate(theory_reqs):
@@ -1040,8 +1081,19 @@ def allocate_timetable_with_ga(entries_input):
                             if covers_p:
                                 active_vars.append(lab_vars[(r_idx, d, start)])
                 
-                # Constraint: Morning period MUST have at least 1 class
-                model.Add(sum(active_vars) >= 1)
+                # Constraint: Morning period SHOULD have at least 1 class (Soft Constraint)
+                morning_filled = model.NewBoolVar(f'Morning_Filled_Y{y}_D{d}_P{p}')
+                
+                # If morning_filled is true, sum(active_vars) >= 1
+                model.Add(sum(active_vars) >= 1).OnlyEnforceIf(morning_filled)
+                
+                # If morning_filled is false, sum(active_vars) == 0
+                model.Add(sum(active_vars) == 0).OnlyEnforceIf(morning_filled.Not())
+                
+                # Add to objective: High reward for filling morning slots
+                # This makes it a "soft" constraint - the solver will try its best to fill them
+                # but won't fail if it's impossible (e.g. not enough subjects).
+                pref_score.append(morning_filled * 5000)
 
     # C8. Afternoon Periods Must Be Filled in Order (Sequential)
     # Afternoon periods must be filled sequentially from period 6 onwards.
@@ -1121,24 +1173,73 @@ def allocate_timetable_with_ga(entries_input):
             # Note: Constraint 2 combined with Constraint 1 ensures:
             # P8 => P7 => P6 (if 8 is filled, then 7 and 6 must also be filled)
 
+    # C9. Max One Lab Per Day Per Year
+    for y in years:
+        for d in DAYS:
+            daily_lab_vars = []
+            for r_idx, req in enumerate(lab_reqs):
+                if req['year'] == y:
+                    dur = req['duration']
+                    valid_starts = [0, 3, 6, 7] if dur == 2 else [0, 3, 6]
+                    for start in valid_starts:
+                        daily_lab_vars.append(lab_vars[(r_idx, d, start)])
+            model.Add(sum(daily_lab_vars) <= 1)
+
 
     # --- Objective: Preferences ---
-    pref_score = []
-    for r_idx, req in enumerate(theory_reqs):
+    # pref_score is already initialized
+    
+    # Helper to apply preference
+    def apply_preference(r_idx, req, is_lab=False):
         prefs = req['prefs']
-        for d in DAYS:
-            for p in TEACHING_PERIODS:
-                # Check preference
-                score = 0
-                if d in prefs:
-                    if prefs[d] and int(prefs[d]) == p:
-                        score = 100 # High bonus for exact match
-                    else:
-                        score = 10 # Small bonus for day match
+        for d, p_str in prefs.items():
+            if not p_str: 
+                continue
+            try:
+                p = int(p_str)
+            except ValueError:
+                continue
+            
+            # 1. STRICT Hard Constraint: MUST be scheduled on Day d at Period p
+            # This forces the solver to place the class exactly where requested.
+            if not is_lab:
+                if p in TEACHING_PERIODS:
+                    model.Add(theory_vars[(r_idx, d, p)] == 1)
+            else:
+                # For Labs
+                dur = req['duration']
+                valid_starts = [0, 3, 6, 7] if dur == 2 else [0, 3, 6]
                 
-                if score > 0:
-                    pref_score.append(theory_vars[(r_idx, d, p)] * score)
+                # Find which start periods COVER the requested period p
+                covering_starts = []
+                for start in valid_starts:
+                    periods = []
+                    if start == 0: periods = [0, 1] if dur==2 else [0, 1, 3]
+                    elif start == 3: periods = [3, 4] if dur==2 else [3, 4, 6]
+                    elif start == 6: periods = [6, 7] if dur==2 else [6, 7, 8]
+                    elif start == 7: periods = [7, 8]
                     
+                    if p in periods:
+                        covering_starts.append(start)
+                
+                if covering_starts:
+                    # Force one of the covering start periods to be selected
+                    model.Add(sum(lab_vars[(r_idx, d, s)] for s in covering_starts) == 1)
+
+    # Apply for Theory
+    for r_idx, req in enumerate(theory_reqs):
+        apply_preference(r_idx, req, is_lab=False)
+
+    # Apply for Labs
+    for r_idx, req in enumerate(lab_reqs):
+        # If the lab has a theory component (Integrated), SKIP applying preference to the Lab.
+        # We assume the preference is intended for the Theory class.
+        # Applying it to both would cause a conflict (Theory at Mon 1st AND Lab at Mon 1st -> Impossible).
+        if req.get('has_theory'):
+            continue
+            
+        apply_preference(r_idx, req, is_lab=True)
+
     model.Maximize(sum(pref_score))
 
     # --- Solve ---
@@ -1148,9 +1249,11 @@ def allocate_timetable_with_ga(entries_input):
 
     # --- Reconstruct Timetable ---
     timetables = {y: {d: [None] * len(PERIODS) for d in DAYS} for y in years}
+    # Initialize teacher allocations: teacher -> year -> day -> slots
+    teacher_allocations = {t: {y: {d: [None] * len(PERIODS) for d in DAYS} for y in years} for t in teachers}
     
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
-        print("✅ OR-Tools found a solution!")
+        print("OK OR-Tools found a solution!")
         
         # Fill Theory
         for r_idx, req in enumerate(theory_reqs):
@@ -1159,7 +1262,11 @@ def allocate_timetable_with_ga(entries_input):
                     if solver.Value(theory_vars[(r_idx, d, p)]):
                         y = req['year']
                         s = req['subject']
+                        t = req['teacher']
                         timetables[y][d][p] = s
+                        # Also fill teacher allocation
+                        if y in teacher_allocations[t]:
+                            teacher_allocations[t][y][d][p] = s
 
         # Fill Labs
         for r_idx, req in enumerate(lab_reqs):
@@ -1169,6 +1276,7 @@ def allocate_timetable_with_ga(entries_input):
                     if solver.Value(lab_vars[(r_idx, d, start)]):
                         y = req['year']
                         s = req['subject']
+                        t = req['teacher']
                         dur = req['duration']
                         label = f"{s} - Lab"
                         
@@ -1180,6 +1288,8 @@ def allocate_timetable_with_ga(entries_input):
                         
                         for p in periods:
                             timetables[y][d][p] = label
+                            if y in teacher_allocations[t]:
+                                teacher_allocations[t][y][d][p] = label
 
         # Fill empty slots with Tutorial
         for y in years:
@@ -1189,6 +1299,6 @@ def allocate_timetable_with_ga(entries_input):
                         timetables[y][d][p] = "Tutorial"
 
     else:
-        print("❌ OR-Tools FAILED to find a solution. Constraints might be too tight.")
+        print("X OR-Tools FAILED to find a solution. Constraints might be too tight.")
     
-    return timetables, []
+    return timetables, [], teacher_allocations
