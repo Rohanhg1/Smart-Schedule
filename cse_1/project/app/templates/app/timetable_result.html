@@ -111,9 +111,187 @@
       text-decoration: underline
     }
 
-    .lab-slot {
-      background-color: #b3d9ff;
+    /* Define 30 unique colors for LAB sessions */
+    .lab-color-0 {
+      background-color: #FFB3BA;
+      font-weight: bold;
     }
+
+    /* Pastel Red */
+    .lab-color-1 {
+      background-color: #FFDFBA;
+      font-weight: bold;
+    }
+
+    /* Pastel Orange */
+    .lab-color-2 {
+      background-color: #FFFFBA;
+      font-weight: bold;
+    }
+
+    /* Pastel Yellow */
+    .lab-color-3 {
+      background-color: #BAFFC9;
+      font-weight: bold;
+    }
+
+    /* Pastel Green */
+    .lab-color-4 {
+      background-color: #BAE1FF;
+      font-weight: bold;
+    }
+
+    /* Pastel Blue */
+    .lab-color-5 {
+      background-color: #E0BBE4;
+      font-weight: bold;
+    }
+
+    /* Pastel Purple */
+    .lab-color-6 {
+      background-color: #FFD4E5;
+      font-weight: bold;
+    }
+
+    /* Pastel Pink */
+    .lab-color-7 {
+      background-color: #FFC8A2;
+      font-weight: bold;
+    }
+
+    /* Peach */
+    .lab-color-8 {
+      background-color: #D5AAFF;
+      font-weight: bold;
+    }
+
+    /* Lavender */
+    .lab-color-9 {
+      background-color: #A2E4B8;
+      font-weight: bold;
+    }
+
+    /* Mint */
+    .lab-color-10 {
+      background-color: #FFE4B5;
+      font-weight: bold;
+    }
+
+    /* Moccasin */
+    .lab-color-11 {
+      background-color: #B4E7CE;
+      font-weight: bold;
+    }
+
+    /* Sea Green */
+    .lab-color-12 {
+      background-color: #FFDAC1;
+      font-weight: bold;
+    }
+
+    /* Apricot */
+    .lab-color-13 {
+      background-color: #C9C9FF;
+      font-weight: bold;
+    }
+
+    /* Periwinkle */
+    .lab-color-14 {
+      background-color: #E2F0CB;
+      font-weight: bold;
+    }
+
+    /* Tea Green */
+    .lab-color-15 {
+      background-color: #FFB7B2;
+      font-weight: bold;
+    }
+
+    /* Light Coral */
+    .lab-color-16 {
+      background-color: #B5EAD7;
+      font-weight: bold;
+    }
+
+    /* Magic Mint */
+    .lab-color-17 {
+      background-color: #FFDFD3;
+      font-weight: bold;
+    }
+
+    /* Pale Dogwood */
+    .lab-color-18 {
+      background-color: #C7CEEA;
+      font-weight: bold;
+    }
+
+    /* Periwinkle Blue */
+    .lab-color-19 {
+      background-color: #FFDAB9;
+      font-weight: bold;
+    }
+
+    /* Peach Puff */
+    .lab-color-20 {
+      background-color: #E6E6FA;
+      font-weight: bold;
+    }
+
+    /* Lavender Mist */
+    .lab-color-21 {
+      background-color: #B0E0E6;
+      font-weight: bold;
+    }
+
+    /* Powder Blue */
+    .lab-color-22 {
+      background-color: #DDA0DD;
+      font-weight: bold;
+    }
+
+    /* Plum */
+    .lab-color-23 {
+      background-color: #F0E68C;
+      font-weight: bold;
+    }
+
+    /* Khaki */
+    .lab-color-24 {
+      background-color: #87CEEB;
+      font-weight: bold;
+    }
+
+    /* Sky Blue */
+    .lab-color-25 {
+      background-color: #FFB6C1;
+      font-weight: bold;
+    }
+
+    /* Light Pink */
+    .lab-color-26 {
+      background-color: #98FB98;
+      font-weight: bold;
+    }
+
+    /* Pale Green */
+    .lab-color-27 {
+      background-color: #FAFAD2;
+      font-weight: bold;
+    }
+
+    /* Light Goldenrod */
+    .lab-color-28 {
+      background-color: #D8BFD8;
+      font-weight: bold;
+    }
+
+    /* Thistle */
+    .lab-color-29 {
+      background-color: #AFEEEE;
+      font-weight: bold;
+    }
+
+    /* Pale Turquoise */
   </style>
 </head>
 
@@ -164,9 +342,13 @@
           <tr>
             <td>{{d}}</td>
             {% for slot in timetables|get_item:year|get_item:d %}
-            <td class="{% if slot and ' - Lab' in slot %}lab-slot{% endif %}">
-              {{slot|default:"-"}}
+            {% if slot and ' - Lab' in slot %}
+            <td class="lab-color-{{ lab_colors|get_item:slot|default:'0' }}">
+              {{slot}}
             </td>
+            {% else %}
+            <td>{{slot|default:"-"}}</td>
+            {% endif %}
             {% endfor %}
           </tr>
           {% endfor %}

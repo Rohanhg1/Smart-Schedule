@@ -14,7 +14,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.forms import formset_factory
 
 from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib.pagesizes import letter, A4, landscape
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -368,6 +368,15 @@ def timetable_teachers(request):
                 if subject not in semester_teacher_subjects[year][teacher]:
                     semester_teacher_subjects[year][teacher].append(subject)
 
+            # Create unique color mapping for each LAB session
+            lab_names = set()
+            for year, days_dict in timetables.items():
+                for day, slots in days_dict.items():
+                    for slot in slots:
+                        if slot and ' - Lab' in slot:
+                            lab_names.add(slot)
+            lab_colors = {lab_name: hash(lab_name) % 30 for lab_name in lab_names}
+
             # Store in session for PDF download and individual teacher views
             request.session["timetables"] = timetables
             request.session["unallocated"] = unallocated
@@ -376,6 +385,7 @@ def timetable_teachers(request):
             request.session["semester_teacher_subjects"] = semester_teacher_subjects
             request.session["year_labels"] = year_labels
             request.session["semester_type"] = semester_type
+            request.session["lab_colors"] = lab_colors
 
             return render(request, "app/timetable_result.html", {
                 "timetables": timetables,
@@ -385,7 +395,8 @@ def timetable_teachers(request):
                 "teacher_subjects": teacher_subjects,
                 "semester_teacher_subjects": semester_teacher_subjects,
                 "year_labels": year_labels,
-                "semester_type": semester_type
+                "semester_type": semester_type,
+                "lab_colors": lab_colors
             })
         else:
             return redirect("timetable_start")
@@ -503,6 +514,15 @@ def timetable_teachers(request):
                 if subject not in semester_teacher_subjects[year][teacher]:
                     semester_teacher_subjects[year][teacher].append(subject)
 
+            # Create unique color mapping for each LAB session
+            lab_names = set()
+            for year, days_dict in timetables.items():
+                for day, slots in days_dict.items():
+                    for slot in slots:
+                        if slot and ' - Lab' in slot:
+                            lab_names.add(slot)
+            lab_colors = {lab_name: hash(lab_name) % 30 for lab_name in lab_names}
+
             # Store in session for PDF download and individual teacher views
             request.session["timetables"] = timetables
             request.session["unallocated"] = unallocated
@@ -511,6 +531,7 @@ def timetable_teachers(request):
             request.session["semester_teacher_subjects"] = semester_teacher_subjects
             request.session["year_labels"] = year_labels
             request.session["semester_type"] = semester_type
+            request.session["lab_colors"] = lab_colors
 
             return render(request, "app/timetable_result.html", {
                 "timetables": timetables,
@@ -520,7 +541,8 @@ def timetable_teachers(request):
                 "teacher_subjects": teacher_subjects,
                 "semester_teacher_subjects": semester_teacher_subjects,
                 "year_labels": year_labels,
-                "semester_type": semester_type
+                "semester_type": semester_type,
+                "lab_colors": lab_colors
             })
         else:
             # show form errors to user for easier debugging (no debug prints)
@@ -544,6 +566,7 @@ def teacher_timetable(request, teacher_name):
     timetables = request.session.get("timetables")
     teacher_subjects = request.session.get("teacher_subjects", {})
     year_labels = request.session.get("year_labels", {})
+    lab_colors = request.session.get("lab_colors", {})
     if not timetables or teacher_name not in teacher_subjects:
         return redirect("timetable_teachers")
 
@@ -576,13 +599,28 @@ def teacher_timetable(request, teacher_name):
                         teacher_slots.append(None)
                 teacher_timetables[year][day] = teacher_slots
 
+    # MERGE ALL SEMESTERS INTO ONE
+    merged_timetable = {day: [[] for _ in range(len(PERIODS))] for day in DAYS}
+    for year, days_dict in teacher_timetables.items():
+        semester_label = year_labels.get(year, f"Sem {year}")
+        for day, slots in days_dict.items():
+            for period_idx, slot in enumerate(slots):
+                if slot:
+                    merged_timetable[day][period_idx].append(f"{slot} (S{semester_label})")
+    # Convert to strings
+    for day in DAYS:
+        for period_idx in range(len(PERIODS)):
+            classes = merged_timetable[day][period_idx]
+            merged_timetable[day][period_idx] = "<br>".join(classes) if classes else None
+
     return render(request, "app/teacher_timetable.html", {
         "teacher_name": teacher_name,
-        "timetables": teacher_timetables,
+        "merged_timetable": merged_timetable,
         "periods": PERIODS,
         "days": DAYS,
         "subjects": teacher_subjects[teacher_name],
-        "year_labels": year_labels
+        "year_labels": year_labels,
+        "lab_colors": lab_colors
     })
 
 
@@ -628,8 +666,22 @@ def download_timetable_pdf(request):
     # COMPACT spacing like your PDF
     small_space = Spacer(1, 6)
 
-    # Lab highlight color (matches your HTML #b3d9ff)
-    lab_bg_color = colors.HexColor("#b3d9ff")
+    # Get lab colors mapping from session
+    lab_colors = request.session.get("lab_colors", {})
+    
+    # Define 30 unique LAB colors (matching HTML and teacher PDF palette)
+    lab_color_palette = [
+        colors.HexColor("#FFB3BA"), colors.HexColor("#FFDFBA"), colors.HexColor("#FFFFBA"),
+        colors.HexColor("#BAFFC9"), colors.HexColor("#BAE1FF"), colors.HexColor("#E0BBE4"),
+        colors.HexColor("#FFD4E5"), colors.HexColor("#FFC8A2"), colors.HexColor("#D5AAFF"),
+        colors.HexColor("#A2E4B8"), colors.HexColor("#FFE4B5"), colors.HexColor("#B4E7CE"),
+        colors.HexColor("#FFDAC1"), colors.HexColor("#C9C9FF"), colors.HexColor("#E2F0CB"),
+        colors.HexColor("#FFB7B2"), colors.HexColor("#B5EAD7"), colors.HexColor("#FFDFD3"),
+        colors.HexColor("#C7CEEA"), colors.HexColor("#FFDAB9"), colors.HexColor("#E6E6FA"),
+        colors.HexColor("#B0E0E6"), colors.HexColor("#DDA0DD"), colors.HexColor("#F0E68C"),
+        colors.HexColor("#87CEEB"), colors.HexColor("#FFB6C1"), colors.HexColor("#98FB98"),
+        colors.HexColor("#FAFAD2"), colors.HexColor("#D8BFD8"), colors.HexColor("#AFEEEE"),
+    ]
 
     for year, days_dict in timetables.items():
         sem_no = year_labels.get(year, year)
@@ -662,15 +714,22 @@ def download_timetable_pdf(request):
             ('TOPPADDING', (0,0), (-1,0), 3),
         ]
 
-        # ------------- HIGHLIGHT LAB SLOTS -------------
+        # ------------- HIGHLIGHT LAB SLOTS WITH UNIQUE COLORS -------------
         # data[row][col]
         # row 0 = header, so start from row 1
         for r_idx in range(1, len(data)):          # skip header row
             for c_idx in range(1, len(data[r_idx])):  # skip "Day" column
                 cell_value = data[r_idx][c_idx]
                 if isinstance(cell_value, str) and " - Lab" in cell_value:
+                    # Get the unique color for this specific LAB
+                    color_idx = lab_colors.get(cell_value, 0)
+                    lab_bg_color = lab_color_palette[color_idx % 30]
                     table_style_commands.append(
                         ('BACKGROUND', (c_idx, r_idx), (c_idx, r_idx), lab_bg_color)
+                    )
+                    # Make LAB text bold
+                    table_style_commands.append(
+                        ('FONTNAME', (c_idx, r_idx), (c_idx, r_idx), 'Helvetica-Bold')
                     )
 
         timetable_table = Table(data)
@@ -722,10 +781,11 @@ def download_teacher_timetable_pdf(request, teacher_name):
     timetables = request.session.get("timetables")
     teacher_subjects = request.session.get("teacher_subjects", {})
     year_labels = request.session.get("year_labels", {})
+    lab_colors = request.session.get("lab_colors", {})
+    
     if not timetables or teacher_name not in teacher_subjects:
         return redirect("timetable_teachers")
 
-    # Filter timetables to show only this teacher's assignments
     # Filter timetables to show only this teacher's assignments
     teacher_allocations = request.session.get("teacher_allocations")
     teacher_timetables = {}
@@ -744,75 +804,142 @@ def download_teacher_timetable_pdf(request, teacher_name):
                         teacher_slots.append(None)
                 teacher_timetables[year][day] = teacher_slots
 
-    # Generate PDF matching the HTML layout and styles
+    # MERGE ALL SEMESTERS INTO ONE (same logic as HTML view)
+    merged_timetable = {day: [[] for _ in range(len(PERIODS))] for day in DAYS}
+    for year, days_dict in teacher_timetables.items():
+        semester_label = year_labels.get(year, f"Sem {year}")
+        for day, slots in days_dict.items():
+            for period_idx, slot in enumerate(slots):
+                if slot:
+                    merged_timetable[day][period_idx].append(f"{slot} (S{semester_label})")
+    
+    # Convert to strings for PDF (use newline instead of <br>)
+    for day in DAYS:
+        for period_idx in range(len(PERIODS)):
+            classes = merged_timetable[day][period_idx]
+            merged_timetable[day][period_idx] = "\n".join(classes) if classes else None
+
+    # Define 30 unique LAB colors (matching HTML palette)
+    lab_color_palette = [
+        colors.HexColor("#FFB3BA"), colors.HexColor("#FFDFBA"), colors.HexColor("#FFFFBA"),
+        colors.HexColor("#BAFFC9"), colors.HexColor("#BAE1FF"), colors.HexColor("#E0BBE4"),
+        colors.HexColor("#FFD4E5"), colors.HexColor("#FFC8A2"), colors.HexColor("#D5AAFF"),
+        colors.HexColor("#A2E4B8"), colors.HexColor("#FFE4B5"), colors.HexColor("#B4E7CE"),
+        colors.HexColor("#FFDAC1"), colors.HexColor("#C9C9FF"), colors.HexColor("#E2F0CB"),
+        colors.HexColor("#FFB7B2"), colors.HexColor("#B5EAD7"), colors.HexColor("#FFDFD3"),
+        colors.HexColor("#C7CEEA"), colors.HexColor("#FFDAB9"), colors.HexColor("#E6E6FA"),
+        colors.HexColor("#B0E0E6"), colors.HexColor("#DDA0DD"), colors.HexColor("#F0E68C"),
+        colors.HexColor("#87CEEB"), colors.HexColor("#FFB6C1"), colors.HexColor("#98FB98"),
+        colors.HexColor("#FAFAD2"), colors.HexColor("#D8BFD8"), colors.HexColor("#AFEEEE"),
+    ]
+
+    # Generate PDF in LANDSCAPE orientation to fit all periods
     buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    doc = SimpleDocTemplate(
+        buffer, 
+        pagesize=landscape(letter),  # LANDSCAPE for wide table
+        leftMargin=20,
+        rightMargin=20,
+        topMargin=30,
+        bottomMargin=30
+    )
     elements = []
     styles = getSampleStyleSheet()
 
     # Title
-    elements.append(Paragraph(f"{teacher_name}'s Timetable", styles['Title']))
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Title'],
+        fontSize=16,
+        alignment=1,
+        spaceAfter=6
+    )
+    elements.append(Paragraph(f"{teacher_name}'s Combined Timetable", title_style))
 
     # Subjects
     subjects_str = ", ".join(teacher_subjects[teacher_name])
     elements.append(Paragraph(f"Subjects: {subjects_str}", styles['Normal']))
-    elements.append(Paragraph("", styles['Normal']))  # Spacer
+    
+    subtitle_style = ParagraphStyle(
+        'Subtitle',
+        parent=styles['Heading2'],
+        fontSize=11,
+        alignment=1,
+        spaceAfter=12
+    )
+    elements.append(Paragraph("All Semesters Merged", subtitle_style))
 
-    for year, days_dict in teacher_timetables.items():
-        # Year heading
-        sem_label = year_labels.get(year, f"Year {year}")
-        elements.append(Paragraph(f"Semester {sem_label}", styles['Heading1']))
+    # Build merged table data
+    data = []
+    # Header row
+    header = ['Day']
+    for period_name, time in PERIODS:
+        header.append(f"{period_name}\n{time}")
+    data.append(header)
 
-        # Build table data: rows for each day, columns for Day + periods
-        data = []
-        # Header row
-        header = ['Day']
-        for period_name, time in PERIODS:
-            header.append(f"{period_name}\n{time}")
-        data.append(header)
+    # Data rows for each day - MAKE SURE TO INCLUDE ALL DAYS
+    for day in DAYS:
+        row = [day]
+        for period_idx in range(len(PERIODS)):
+            slot = merged_timetable[day][period_idx]
+            row.append(slot if slot else '-')
+        data.append(row)
 
-        # Data rows for each day
-        for day in DAYS:
-            row = [day]
-            slots = days_dict.get(day, [None] * len(PERIODS))
-            for slot in slots:
-                row.append(slot if slot else '-')
-            data.append(row)
+    # Create table with specific column widths to fit landscape page
+    # Landscape letter is 11" x 8.5" = 792 x 612 points
+    # Available width ≈ 752 points (792 - 40 for margins)
+    # Day column: 60 points, 9 period columns: ~77 points each
+    col_widths = [60] + [77] * len(PERIODS)  # Day + all periods
+    table = Table(data, colWidths=col_widths)
 
-        # Create table
-        table = Table(data)
+    # Base table styles
+    table_styles = [
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#f2f2f2')),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 7),  # Smaller header font
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('FONTSIZE', (0, 1), (-1, -1), 6),  # Smaller content font
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('LEFTPADDING', (0, 0), (-1, -1), 3),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 3),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#ddd')),
+        # Bold Day column
+        ('FONTNAME', (0, 1), (0, -1), 'Helvetica-Bold'),
+    ]
 
-        # Define styles to match HTML CSS
-        table_styles = [
-            # Header row: background #f2f2f2, bold, center
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#f2f2f2')),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
-            ('TOPPADDING', (0, 0), (-1, 0), 8),
-            ('LEFTPADDING', (0, 0), (-1, -1), 8),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 8),
-            # Grid: 1px solid #ddd
-            ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#ddd')),
-        ]
-
-        # Apply cell-specific styles for body rows
-        for row_idx in range(1, len(data)):  # Skip header
-            for col_idx in range(1, len(data[row_idx])):  # Skip 'Day' column
-                slot = data[row_idx][col_idx]
-                if slot and slot != '-' and any(subject in slot for subject in teacher_subjects[teacher_name]):
-                    # Subject highlight: background #e9f7ef, bold
+    # Apply unique LAB colors and highlights
+    for row_idx in range(1, len(data)):  # Skip header
+        for col_idx in range(1, len(data[row_idx])):  # Skip 'Day' column
+            slot = data[row_idx][col_idx]
+            if slot and slot != '-':
+                # Check if it's a LAB by looking for " - Lab" in the slot text
+                if " - Lab" in slot:
+                    # Extract the base lab name (before the semester label) to match lab_colors
+                    # Format is like "Subject - Lab (S3)\nAnother - Lab (S5)"
+                    lines = slot.split('\n')
+                    for line in lines:
+                        if ' - Lab' in line:
+                            # Extract just the "Subject - Lab" part (before "(S")
+                            lab_name = line.split(' (S')[0] if ' (S' in line else line
+                            # Get color index from lab_colors mapping
+                            color_idx = lab_colors.get(lab_name, 0)
+                            lab_bg_color = lab_color_palette[color_idx % 30]
+                            table_styles.append(('BACKGROUND', (col_idx, row_idx), (col_idx, row_idx), lab_bg_color))
+                            table_styles.append(('FONTNAME', (col_idx, row_idx), (col_idx, row_idx), 'Helvetica-Bold'))
+                            break  # Use first LAB's color if multiple
+                else:
+                    # Regular subject: light green highlight
                     table_styles.append(('BACKGROUND', (col_idx, row_idx), (col_idx, row_idx), colors.HexColor('#e9f7ef')))
                     table_styles.append(('FONTNAME', (col_idx, row_idx), (col_idx, row_idx), 'Helvetica-Bold'))
-                elif not slot or slot == '-':
-                    # Empty slot: background #f9f9f9, color #999
-                    table_styles.append(('BACKGROUND', (col_idx, row_idx), (col_idx, row_idx), colors.HexColor('#f9f9f9')))
-                    table_styles.append(('TEXTCOLOR', (col_idx, row_idx), (col_idx, row_idx), colors.HexColor('#999')))
+            else:
+                # Empty slot: light gray
+                table_styles.append(('BACKGROUND', (col_idx, row_idx), (col_idx, row_idx), colors.HexColor('#f9f9f9')))
+                table_styles.append(('TEXTCOLOR', (col_idx, row_idx), (col_idx, row_idx), colors.HexColor('#999')))
 
-        table.setStyle(TableStyle(table_styles))
-        elements.append(table)
-        elements.append(Paragraph("", styles['Normal']))  # Spacer
+    table.setStyle(TableStyle(table_styles))
+    elements.append(table)
 
     doc.build(elements)
     buffer.seek(0)
