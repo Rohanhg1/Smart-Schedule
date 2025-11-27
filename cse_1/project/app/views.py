@@ -340,7 +340,7 @@ def timetable_teachers(request):
     if request.method == "POST" and 'regenerate' in request.POST:
         entries = request.session.get("entries")
         if entries:
-            timetables, unallocated = allocate_timetable_with_ga(entries)
+            timetables, unallocated, teacher_allocations = allocate_timetable_with_ga(entries)
 
             # Collect teachers and their subjects
             teacher_subjects = {}
@@ -352,10 +352,28 @@ def timetable_teachers(request):
                 if subject not in teacher_subjects[teacher]:
                     teacher_subjects[teacher].append(subject)
 
+            # Collect teachers and their subjects per semester/year
+            semester_teacher_subjects = {}
+            for entry in entries:
+                year = entry['year']
+                teacher = entry['teacher']
+                subject = entry['subject']
+                
+                if year not in semester_teacher_subjects:
+                    semester_teacher_subjects[year] = {}
+                
+                if teacher not in semester_teacher_subjects[year]:
+                    semester_teacher_subjects[year][teacher] = []
+                
+                if subject not in semester_teacher_subjects[year][teacher]:
+                    semester_teacher_subjects[year][teacher].append(subject)
+
             # Store in session for PDF download and individual teacher views
             request.session["timetables"] = timetables
             request.session["unallocated"] = unallocated
             request.session["teacher_subjects"] = teacher_subjects
+            request.session["teacher_allocations"] = teacher_allocations
+            request.session["semester_teacher_subjects"] = semester_teacher_subjects
             request.session["year_labels"] = year_labels
             request.session["semester_type"] = semester_type
 
@@ -365,6 +383,7 @@ def timetable_teachers(request):
                 "days": DAYS,
                 "unallocated": unallocated,
                 "teacher_subjects": teacher_subjects,
+                "semester_teacher_subjects": semester_teacher_subjects,
                 "year_labels": year_labels,
                 "semester_type": semester_type
             })
@@ -609,6 +628,9 @@ def download_timetable_pdf(request):
     # COMPACT spacing like your PDF
     small_space = Spacer(1, 6)
 
+    # Lab highlight color (matches your HTML #b3d9ff)
+    lab_bg_color = colors.HexColor("#b3d9ff")
+
     for year, days_dict in timetables.items():
         sem_no = year_labels.get(year, year)
 
@@ -629,8 +651,8 @@ def download_timetable_pdf(request):
                 row.append(slot if slot else "-")
             data.append(row)
 
-        timetable_table = Table(data)
-        timetable_table.setStyle(TableStyle([
+        # Base styles
+        table_style_commands = [
             ('GRID', (0,0), (-1,-1), 0.5, colors.black),
             ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
             ('ALIGN', (0,0), (-1,-1), 'CENTER'),
@@ -638,7 +660,21 @@ def download_timetable_pdf(request):
             ('FONTSIZE', (0,0), (-1,-1), 7),
             ('BOTTOMPADDING', (0,0), (-1,0), 3),
             ('TOPPADDING', (0,0), (-1,0), 3),
-        ]))
+        ]
+
+        # ------------- HIGHLIGHT LAB SLOTS -------------
+        # data[row][col]
+        # row 0 = header, so start from row 1
+        for r_idx in range(1, len(data)):          # skip header row
+            for c_idx in range(1, len(data[r_idx])):  # skip "Day" column
+                cell_value = data[r_idx][c_idx]
+                if isinstance(cell_value, str) and " - Lab" in cell_value:
+                    table_style_commands.append(
+                        ('BACKGROUND', (c_idx, r_idx), (c_idx, r_idx), lab_bg_color)
+                    )
+
+        timetable_table = Table(data)
+        timetable_table.setStyle(TableStyle(table_style_commands))
 
         elements.append(timetable_table)
         elements.append(Spacer(1, 12))  # small spacing only
@@ -675,8 +711,9 @@ def download_timetable_pdf(request):
     buffer.seek(0)
 
     response = HttpResponse(buffer.getvalue(), content_type="application/pdf")
-    response['Content-Disposition'] = 'attachment; filename=\"timetable.pdf\"'
+    response['Content-Disposition'] = 'attachment; filename="timetable.pdf"'
     return response
+
 
 
 
@@ -1015,37 +1052,10 @@ def allocate_timetable_with_ga(entries_input):
                 is_busy = model.NewBoolVar(f'Busy_{t}_{d}_{p}')
                 model.Add(sum(busy_vars) == is_busy)
                 
-                # 2. Rest Period Constraint
-                # If is_busy is true, then teacher CANNOT be busy at next_period
-                # unless it's part of the SAME lab block.
-                # But we handle this by checking who forces a rest.
-                
-                rest_vars = [] # Variables that force a rest at 'p'
-                
-                # Theory at 'prev' forces rest at 'p' if NEXT_REST_MAP[prev] == p
-                for prev in TEACHING_PERIODS:
-                    if NEXT_REST_MAP.get(prev) == p:
-                        for r_idx, req in enumerate(theory_reqs):
-                            if req['teacher'] == t:
-                                rest_vars.append(theory_vars[(r_idx, d, prev)])
-                
-                # Lab ending before 'p' forces rest at 'p'
-                for r_idx, req in enumerate(lab_reqs):
-                    if req['teacher'] == t:
-                        dur = req['duration']
-                        valid_starts = [0, 3, 6, 7] if dur == 2 else [0, 3, 6]
-                        for start in valid_starts:
-                            last_p = -1
-                            if start == 0: last_p = 1 if dur==2 else 3
-                            elif start == 3: last_p = 4 if dur==2 else 6
-                            elif start == 6: last_p = 7 if dur==2 else 8
-                            elif start == 7: last_p = 8
-                            
-                            if NEXT_REST_MAP.get(last_p) == p:
-                                rest_vars.append(lab_vars[(r_idx, d, start)])
-
-                # Constraint: If any variable in rest_vars is True, then is_busy must be False
-                model.Add(sum(rest_vars) + is_busy <= 1)
+                # 2. Rest Period Constraint (REMOVED)
+                # We allow teachers to have consecutive classes (e.g. 9-10 then 10-11).
+                # Previously, this constraint prevented back-to-back classes, causing INFEASIBLE errors.
+                pass
 
     # C7. Morning Periods Must Be Filled
     # For every semester (year) on every working day, the first 3 periods MUST be filled
@@ -1162,18 +1172,26 @@ def allocate_timetable_with_ga(entries_input):
             model.Add(sum(period_8_vars) >= 1).OnlyEnforceIf(period_8_occupied)
             model.Add(sum(period_8_vars) == 0).OnlyEnforceIf(period_8_occupied.Not())
             
-            # Constraint 1: If period 7 is occupied, period 6 MUST be occupied
+            # Constraint 1: If period 7 is occupied, period 6 SHOULD be occupied (Soft Constraint)
             # P7 => P6  (equivalent to: NOT P7 OR P6)
-            model.AddBoolOr([period_7_occupied.Not(), period_6_occupied])
-            
-            # Constraint 2: If period 8 is occupied, period 7 MUST be occupied
+            # model.AddBoolOr([period_7_occupied.Not(), period_6_occupied])
+            gap_7_6 = model.NewBoolVar(f'gap_7_6_{y}_{d}')
+            model.AddBoolAnd([period_7_occupied, period_6_occupied.Not()]).OnlyEnforceIf(gap_7_6)
+            model.AddBoolOr([period_7_occupied.Not(), period_6_occupied]).OnlyEnforceIf(gap_7_6.Not())
+            pref_score.append(gap_7_6 * -1000) # Penalty for gap
+
+            # Constraint 2: If period 8 is occupied, period 7 SHOULD be occupied (Soft Constraint)
             # P8 => P7  (equivalent to: NOT P8 OR P7)
-            model.AddBoolOr([period_8_occupied.Not(), period_7_occupied])
+            # model.AddBoolOr([period_8_occupied.Not(), period_7_occupied])
+            gap_8_7 = model.NewBoolVar(f'gap_8_7_{y}_{d}')
+            model.AddBoolAnd([period_8_occupied, period_7_occupied.Not()]).OnlyEnforceIf(gap_8_7)
+            model.AddBoolOr([period_8_occupied.Not(), period_7_occupied]).OnlyEnforceIf(gap_8_7.Not())
+            pref_score.append(gap_8_7 * -1000) # Penalty for gap
             
             # Note: Constraint 2 combined with Constraint 1 ensures:
             # P8 => P7 => P6 (if 8 is filled, then 7 and 6 must also be filled)
 
-    # C9. Max One Lab Per Day Per Year
+    # C9. Max One Lab Per Day Per Year (Relaxed to Soft Constraint)
     for y in years:
         for d in DAYS:
             daily_lab_vars = []
@@ -1183,7 +1201,62 @@ def allocate_timetable_with_ga(entries_input):
                     valid_starts = [0, 3, 6, 7] if dur == 2 else [0, 3, 6]
                     for start in valid_starts:
                         daily_lab_vars.append(lab_vars[(r_idx, d, start)])
-            model.Add(sum(daily_lab_vars) <= 1)
+            
+            # HARD CONSTRAINT: Max 1 lab per day
+            if daily_lab_vars:
+                model.Add(sum(daily_lab_vars) <= 1)
+
+    # C10. No Same-Slot Repetition on Consecutive Days (unless preferred)
+    # If a subject is at period P on Day D, it should NOT be at period P on Day D+1
+    for r_idx, req in enumerate(theory_reqs):
+        prefs = req['prefs']
+        for p in TEACHING_PERIODS:
+            for i in range(len(DAYS) - 1):
+                d_curr = DAYS[i]
+                d_next = DAYS[i+1]
+                
+                # Check if this specific slot is preferred on either day
+                # prefs is {Day: Period_String}
+                pref_curr = prefs.get(d_curr)
+                pref_next = prefs.get(d_next)
+                
+                is_pref_curr = False
+                if pref_curr:
+                    try:
+                        if int(pref_curr) == p: is_pref_curr = True
+                    except ValueError: pass
+                    
+                is_pref_next = False
+                if pref_next:
+                    try:
+                        if int(pref_next) == p: is_pref_next = True
+                    except ValueError: pass
+                
+                # If neither day has an explicit preference for this slot, forbid repetition
+                if not is_pref_curr and not is_pref_next:
+                    model.Add(theory_vars[(r_idx, d_curr, p)] + theory_vars[(r_idx, d_next, p)] <= 1)
+
+    # DEBUG: Check total load per year
+    print("\n🔧 DEBUG: Checking Workload Capacity...")
+    for y in years:
+        total_theory = 0
+        for r in theory_reqs:
+            if r['year'] == y: total_theory += 1 # Each theory req is 1 hour
+        
+        total_lab_hours = 0
+        lab_count = 0
+        for r in lab_reqs:
+            if r['year'] == y:
+                total_lab_hours += r['duration']
+                lab_count += 1
+        
+        total_hours = total_theory + total_lab_hours
+        capacity = len(TEACHING_PERIODS) * len(DAYS) # 7 * 5 = 35
+        print(f"   Year {y}: {total_theory} Theory + {total_lab_hours} Lab Hours ({lab_count} Labs). Total: {total_hours}/{capacity}")
+        
+        if total_hours > capacity:
+            print(f"   ⚠️ CRITICAL WARNING: Year {y} is OVER CAPACITY! ({total_hours} > {capacity})")
+            print(f"      It is IMPOSSIBLE to schedule this without removing subjects.")
 
 
     # --- Objective: Preferences ---
@@ -1200,11 +1273,12 @@ def allocate_timetable_with_ga(entries_input):
             except ValueError:
                 continue
             
-            # 1. STRICT Hard Constraint: MUST be scheduled on Day d at Period p
-            # This forces the solver to place the class exactly where requested.
+            # 1. STRICT PREFERENCE (Soft-Hard Constraint)
+            # We use a massive weight (1,000,000) to force the solver to respect this
+            # UNLESS it is physically impossible (e.g. conflicts with other hard constraints).
             if not is_lab:
                 if p in TEACHING_PERIODS:
-                    model.Add(theory_vars[(r_idx, d, p)] == 1)
+                    pref_score.append(theory_vars[(r_idx, d, p)] * 1000000)
             else:
                 # For Labs
                 dur = req['duration']
@@ -1223,8 +1297,8 @@ def allocate_timetable_with_ga(entries_input):
                         covering_starts.append(start)
                 
                 if covering_starts:
-                    # Force one of the covering start periods to be selected
-                    model.Add(sum(lab_vars[(r_idx, d, s)] for s in covering_starts) == 1)
+                    # Reward 1,000,000 points if ANY of the covering starts is selected
+                    pref_score.append(sum(lab_vars[(r_idx, d, s)] for s in covering_starts) * 1000000)
 
     # Apply for Theory
     for r_idx, req in enumerate(theory_reqs):
@@ -1244,8 +1318,19 @@ def allocate_timetable_with_ga(entries_input):
 
     # --- Solve ---
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 10.0
+    solver.parameters.max_time_in_seconds = 120.0  # Increased from 10 to 120 seconds for large inputs
+    solver.parameters.log_search_progress = False  # Set to True to see solver progress
+    
+    print(f"\n🔧 DEBUG: Starting solver with {len(theory_reqs)} theory reqs and {len(lab_reqs)} lab reqs...")
     status = solver.Solve(model)
+    
+    print(f"🔧 DEBUG: Solver status: {solver.StatusName(status)}")
+    print(f"🔧 DEBUG: Solver wall time: {solver.WallTime():.2f}s")
+    
+    if status not in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+        print(f"⚠️ WARNING: Solver could not find a solution! Status: {solver.StatusName(status)}")
+        print(f"   This usually means the constraints are too restrictive.")
+        print(f"   Try reducing preferences or adjusting teacher workloads.")
 
     # --- Reconstruct Timetable ---
     timetables = {y: {d: [None] * len(PERIODS) for d in DAYS} for y in years}

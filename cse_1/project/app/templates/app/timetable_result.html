@@ -110,6 +110,10 @@
     a:hover {
       text-decoration: underline
     }
+
+    .lab-slot {
+      background-color: #b3d9ff;
+    }
   </style>
 </head>
 
@@ -117,26 +121,35 @@
   <div class="container-card">
     <div style="text-align:center">
       <h2>Generated Timetables</h2>
+
       {% if unallocated %}
       <div class="warning">
         <strong>Warning — some hours couldn't be scheduled:</strong>
         <ul>
           {% for u in unallocated %}
-          <li>{{u.teacher}} (Year {{u.year}}) — {{u.subject}} — remaining hours: {{u.remaining}} — integrated:
-            {{u.is_integrated}} — external lab: {{u.is_external_lab}}</li>
+          <li>
+            {{u.teacher}} (Year {{u.year}}) — {{u.subject}} — remaining: {{u.remaining}}
+            <br>
+            Integrated: {{u.is_integrated}} — Ext Lab: {{u.is_external_lab}}
+          </li>
           {% endfor %}
         </ul>
       </div>
       {% endif %}
+
       <div class="teacher-boxes">
         {% for tch,subj in teacher_subjects.items %}
         <div class="teacher-box">
-          <h4><a href="{% url 'teacher_timetable' teacher_name=tch %}"
-              style="color:#27ae60;text-decoration:none">{{tch}}</a></h4>
+          <h4>
+            <a href="{% url 'teacher_timetable' teacher_name=tch %}" style="color:#27ae60;text-decoration:none">
+              {{tch}}
+            </a>
+          </h4>
           <p>{{subj|join:", "}}</p>
         </div>
         {% endfor %}
       </div>
+
       {% for year,days_dict in timetables.items %}
       <div class="year-block">
         <h3>Semester {{year_labels|get_item:year}}</h3>
@@ -151,16 +164,20 @@
           <tr>
             <td>{{d}}</td>
             {% for slot in timetables|get_item:year|get_item:d %}
-            <td style="{% if slot and ' - Lab' in slot %}background-color:#b3d9ff{% endif %}">{{slot|default:"-"}}</td>
+            <td class="{% if slot and ' - Lab' in slot %}lab-slot{% endif %}">
+              {{slot|default:"-"}}
+            </td>
             {% endfor %}
           </tr>
           {% endfor %}
         </table>
+
         {% with semester_data=semester_teacher_subjects|get_item:year %}
         {% if semester_data %}
         <div style="margin-top:20px;background-color:#f8f9fa;padding:15px;border-radius:8px">
-          <h4 style="color:#555;margin-bottom:10px;font-size:1.1rem">📋 Teachers Handling Subjects - Semester
-            {{year_labels|get_item:year}}</h4>
+          <h4 style="color:#555;margin-bottom:10px;font-size:1.1rem">
+            📋 Teachers Handling Subjects - Semester {{year_labels|get_item:year}}
+          </h4>
           <table style="width:100%;margin-bottom:0">
             <tr style="background-color:#e9f7ef">
               <th style="text-align:left;padding:8px;width:40%">Teacher Name</th>
@@ -181,10 +198,6 @@
       <form method="POST">
         {% csrf_token %}
         <button type="submit" formaction="{% url 'download_timetable_pdf' %}">Download Timetable PDF</button>
-      </form>
-      <form method="POST">
-        {% csrf_token %}
-        <button type="submit" name="regenerate" value="regenerate">Generate Again</button>
       </form>
       <p><a href="{% url 'choice' %}">Back to Dashboard</a></p>
     </div>
